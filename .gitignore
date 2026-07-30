@@ -1,0 +1,49 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuración
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Cachés
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Builds
+build/
+dist/
+*.egg-info/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# MetaTrader
+*.ex5
+*.mq5~
+*.tmp
+
+# Modelos grandes (descomenta si NO quieres subirlos)
+# data/models/
+# *.joblib
+# *.pkl
+# *.onnx
