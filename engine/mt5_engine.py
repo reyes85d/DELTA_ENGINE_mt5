@@ -182,11 +182,35 @@ class MT5Engine:
     # MERCADO ABIERTO
     # ==========================================================
 
-    def is_market_open(self) -> bool:
-        """Forex opera 24/5. Sábado y Domingo cerrado"""
+    # En engine/mt5_engine.py, reemplaza la función is_market_open
+
+    def is_market_open(self, symbol: str = None) -> bool:
+        """Verifica si el mercado está abierto para un símbolo específico"""
         now = datetime.now()
+        
+        # Fin de semana
         if now.weekday() >= 5:  # Sábado o Domingo
             return False
+        
+        # Si no hay símbolo, asumir Forex (abierto 24/5)
+        if symbol is None:
+            return True
+        
+        # Verificar tipo de activo
+        asset_type = self.asset_manager.get_asset_type(symbol)
+        
+        if asset_type == 'FOREX':
+            # Forex opera 24/5 (excepto fines de semana)
+            return True
+        
+        elif asset_type == 'STOCK':
+            # Acciones: NYSE/NASDAQ 9:30 AM - 4:00 PM ET (14:30-21:00 UTC)
+            hour_utc = now.hour + (now.minute / 60)
+            # 14:30 UTC = 9:30 AM ET
+            # 21:00 UTC = 4:00 PM ET
+            return 14.5 <= hour_utc <= 21.0
+        
+        # Otros activos (asumir abiertos)
         return True
 
     def market_status(self):
@@ -248,12 +272,19 @@ class MT5Engine:
         logger.info(f"📊 BUY={len(buys)} SELL={len(sells)}")
         return buys, sells
 
+    # En engine/mt5_engine.py, reemplaza la función execute_trade
+
     def execute_trade(self, signal):
-        """Ejecuta una orden - Adaptado para Acciones y Forex"""
+        """Ejecuta una orden con validación de SL/TP"""
         try:
             symbol = signal['symbol']
             price = signal['price']
             atr = signal.get('atr', 0.001)
+            
+            # 🔥 VERIFICAR MERCADO ABIERTO
+            if not self.is_market_open(symbol):
+                logger.info(f"⏳ {symbol}: Mercado cerrado, saltando...")
+                return
             
             # VERIFICAR POSICIÓN
             if self.position_manager.exists(symbol):
@@ -269,14 +300,65 @@ class MT5Engine:
             # CALCULAR CANTIDAD SEGÚN TIPO DE ACTIVO
             asset_type = self.asset_manager.get_asset_type(symbol)
             
+            # Obtener información del símbolo para validar SL/TP
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                logger.error(f"❌ No se pudo obtener información de {symbol}")
+                return
+            
+            # Calcular el tamaño mínimo de distancia (10 ticks)
+            min_distance = symbol_info.trade_tick_size * 10
+            
             if asset_type == 'STOCK':
-                quantity = DEFAULT_QTY_STOCK  # 10 acciones
-                stop = price * (1 - STOCK_SL_PCT) if signal['action'] == 'BUY' else price * (1 + STOCK_SL_PCT)
-                target = price * (1 + STOCK_TP_PCT) if signal['action'] == 'BUY' else price * (1 - STOCK_TP_PCT)
+                quantity = DEFAULT_QTY_STOCK
+                if signal['action'] == 'BUY':
+                    stop = price * (1 - STOCK_SL_PCT)
+                    target = price * (1 + STOCK_TP_PCT)
+                else:
+                    stop = price * (1 + STOCK_SL_PCT)
+                    target = price * (1 - STOCK_TP_PCT)
             else:
-                quantity = DEFAULT_QTY_FOREX  # 0.05 lotes
-                stop = price - (atr * ATR_MULTIPLIER_SL) if signal['action'] == 'BUY' else price + (atr * ATR_MULTIPLIER_SL)
-                target = price + (atr * ATR_MULTIPLIER_TP) if signal['action'] == 'BUY' else price - (atr * ATR_MULTIPLIER_TP)
+                quantity = DEFAULT_QTY_FOREX
+                # Para Forex, usar ATR pero con validación
+                if signal['action'] == 'BUY':
+                    stop = price - (atr * ATR_MULTIPLIER_SL)
+                    target = price + (atr * ATR_MULTIPLIER_TP)
+                else:
+                    stop = price + (atr * ATR_MULTIPLIER_SL)
+                    target = price - (atr * ATR_MULTIPLIER_TP)
+            
+            # 🔥 VALIDAR SL/TP
+            # Para compras: SL debe ser < price, TP debe ser > price
+            # Para ventas: SL debe ser > price, TP debe ser < price
+            
+            if signal['action'] == 'BUY':
+                # Validar SL (debe ser menor que el precio)
+                if stop >= price or abs(stop - price) < min_distance:
+                    stop = price - max(price * 0.005, min_distance)
+                    logger.debug(f"   SL ajustado a {stop:.5f}")
+                
+                # Validar TP (debe ser mayor que el precio)
+                if target <= price or abs(target - price) < min_distance:
+                    target = price + max(price * 0.01, min_distance * 2)
+                    logger.debug(f"   TP ajustado a {target:.5f}")
+            
+            else:  # SELL
+                # Validar SL (debe ser mayor que el precio)
+                if stop <= price or abs(stop - price) < min_distance:
+                    stop = price + max(price * 0.005, min_distance)
+                    logger.debug(f"   SL ajustado a {stop:.5f}")
+                
+                # Validar TP (debe ser menor que el precio)
+                if target >= price or abs(target - price) < min_distance:
+                    target = price - max(price * 0.01, min_distance * 2)
+                    logger.debug(f"   TP ajustado a {target:.5f}")
+            
+            # 🔥 VERIFICAR QUE SL/TP NO ESTÉN INVERTIDOS
+            if signal['action'] == 'BUY':
+                if stop >= target:
+                    logger.warning(f"⚠️ SL >= TP para BUY, ajustando...")
+                    stop = price - 0.01
+                    target = price + 0.02
             
             logger.info(f"📊 {symbol} ({asset_type}): {signal['action']} {quantity} @ {price:.2f}")
             logger.info(f"   SL: {stop:.2f} | TP: {target:.2f}")
@@ -304,6 +386,8 @@ class MT5Engine:
     # BUCLE PRINCIPAL
     # ==========================================================
 
+    # En engine/mt5_engine.py, modifica el bucle principal
+
     def run(self):
         """Bucle principal del motor"""
         if not self.is_connected():
@@ -325,23 +409,37 @@ class MT5Engine:
             try:
                 self.scan_count += 1
                 
-                if not self.is_market_open():
-                    logger.info("🔴 Mercado cerrado. Esperando...")
-                    time.sleep(60)
-                    continue
-
-                # Sincronizar
+                # Sincronizar posiciones
                 self.position_manager.sync()
                 self.order_manager.sync()
+
+                # Verificar mercado global (Forex)
+                if not self.is_market_open():
+                    logger.info("🔴 Mercado Forex cerrado (fin de semana). Esperando...")
+                    time.sleep(60)
+                    continue
 
                 # Escanear
                 buys, sells = self.scan_market()
 
-                # Ejecutar compras
+                # Ejecutar compras (con validación individual)
                 if buys:
                     available = self.risk_manager.max_positions - len(self.position_manager.all())
                     for signal in buys[:available]:
-                        self.execute_trade(signal)
+                        # 🔥 Verificar mercado para cada símbolo individualmente
+                        if self.is_market_open(signal['symbol']):
+                            self.execute_trade(signal)
+                        else:
+                            logger.info(f"⏳ {signal['symbol']}: Mercado cerrado, saltando...")
+
+                # Ejecutar ventas (si las hay)
+                if sells:
+                    available = self.risk_manager.max_positions - len(self.position_manager.all())
+                    for signal in sells[:available]:
+                        if self.is_market_open(signal['symbol']):
+                            self.execute_trade(signal)
+                        else:
+                            logger.info(f"⏳ {signal['symbol']}: Mercado cerrado, saltando...")
 
                 # Resumen
                 self.position_manager.print_summary()
