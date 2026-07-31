@@ -47,105 +47,51 @@ class Predictor:
         
         logger.info(f"✅ {loaded_count} modelos cargados de {self.model_dir}")
     
+        # ai/predictor.py - CORREGIR EL WARNING
+
     def predict(self, symbol: str, features: dict) -> dict:
-        """
-        Predice usando el modelo XGBoost
-        
-        Args:
-            symbol: Símbolo a predecir (ej: 'GOOG')
-            features: Diccionario con las features requeridas
-            
-        Returns:
-            Dict con: signal, confidence, score, probability, prediction
-        """
+        """Predice usando el modelo XGBoost - VERSIÓN CORREGIDA"""
         try:
             if symbol not in self.models:
-                logger.debug(f"⚠️ No hay modelo para {symbol}")
-                return {
-                    'signal': 'NEUTRAL', 
-                    'confidence': 0, 
-                    'score': 0,
-                    'probability': 0.5,
-                    'prediction': 0
-                }
+                return {'signal': 'NEUTRAL', 'confidence': 0, 'score': 0}
             
             model = self.models[symbol]
+            scaler = self.scalers.get(symbol)
             
             # Preparar features en el orden correcto
-            feature_values = []
-            for f in self.feature_order:
-                value = features.get(f, 0)
-                # Si es NaN, convertir a 0
-                if pd.isna(value) or np.isnan(value):
-                    value = 0
-                feature_values.append(value)
+            feature_order = ['return_1', 'return_5', 'sma_10', 'sma_20', 'rsi']
+            feature_values = [[features.get(f, 0) for f in feature_order]]
             
-            # Convertir a array 2D
-            X = np.array([feature_values], dtype=np.float32)
+            # 🔥 CREAR DATAFRAME CON NOMBRES DE COLUMNAS PARA EVITAR EL WARNING
+            import pandas as pd
+            X = pd.DataFrame(feature_values, columns=feature_order)
             
-            # Aplicar scaler si existe
-            if symbol in self.scalers:
-                try:
-                    X = self.scalers[symbol].transform(X)
-                except Exception as e:
-                    logger.debug(f"Error escalando {symbol}: {e}")
-                    # Si falla el scaler, usar datos sin escalar
-            
-            # Predecir probabilidades
-            try:
-                # Intentar con predict_proba (para XGBoost, RandomForest, etc)
-                if hasattr(model, 'predict_proba'):
-                    proba = model.predict_proba(X)[0]
-                    prediction = model.predict(X)[0]
-                else:
-                    # Para modelos sin predict_proba
-                    prediction = model.predict(X)[0]
-                    proba = [1 - prediction, prediction]  # Estimación simple
-            except Exception as e:
-                logger.error(f"Error en predicción {symbol}: {e}")
-                return {
-                    'signal': 'NEUTRAL', 
-                    'confidence': 0, 
-                    'score': 0,
-                    'probability': 0.5,
-                    'prediction': 0
-                }
-            
-            # Calcular score (0-70)
-            # proba[1] = probabilidad de clase 1 (BUY)
-            buy_probability = float(proba[1])
-            score = buy_probability * 70
-            
-            # Determinar señal
-            if prediction == 1:
-                signal = 'BUY'
-                confidence = buy_probability
+            # Escalar si es necesario
+            if scaler:
+                X_scaled = scaler.transform(X)
             else:
-                signal = 'SELL'
-                confidence = float(proba[0])
+                X_scaled = X.values
             
-            # 🔥 LOG DE DIAGNÓSTICO
-            logger.debug(f"🤖 {symbol}: pred={prediction} | proba_Buy={buy_probability:.3f} | score={score:.1f}/70")
+            # Predecir
+            proba = model.predict_proba(X_scaled)[0]
+            prediction = model.predict(X_scaled)[0]
+            
+            # Calcular score
+            score = proba[1] * 70
+            
+            signal = 'BUY' if prediction == 1 else 'SELL'
+            confidence = proba[1] if prediction == 1 else proba[0]
             
             return {
                 'signal': signal,
                 'confidence': confidence,
                 'score': score,
-                'probability': buy_probability,
-                'prediction': int(prediction)
+                'probability': proba[1]
             }
             
         except Exception as e:
             logger.error(f"Error prediciendo {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'signal': 'NEUTRAL', 
-                'confidence': 0, 
-                'score': 0,
-                'probability': 0.5,
-                'prediction': 0
-            }
+            return {'signal': 'NEUTRAL', 'confidence': 0, 'score': 0}
     
     def predict_batch(self, symbol: str, features_list: list) -> list:
         """Predice múltiples muestras a la vez"""

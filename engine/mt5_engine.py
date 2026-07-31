@@ -1,5 +1,5 @@
 """
-Motor principal para MetaTrader 5 - VERSIÓN COMPLETA Y CORREGIDA
+Motor principal para MetaTrader 5 - VERSIÓN COMPLETA CON INTEGRACIÓN DE MÓDULOS MEJORADOS
 """
 
 import time
@@ -23,7 +23,8 @@ from config import (
     DEFAULT_QTY_FOREX,
     MT5_LOGIN,
     MT5_PASSWORD,
-    MT5_SERVER
+    MT5_SERVER,
+    COOLDOWN_MINUTES
 )
 
 from engine.asset_manager import AssetManager
@@ -38,17 +39,28 @@ logger = get_logger(__name__)
 
 
 class MT5Engine:
-    """Motor principal para MetaTrader 5"""
+    """Motor principal para MetaTrader 5 - VERSIÓN MEJORADA"""
 
     def __init__(self):
-        logger.info("Inicializando DELTA ENGINE para MT5...")
+        logger.info("🚀 Inicializando DELTA ENGINE para MT5...")
         self.connected = False
         self.running = False
         self.account = None
         self.start_time = datetime.now()
         self.scan_count = 0
-
-        # Inicializar módulos
+        
+        # 🔥 ESTADO DEL SISTEMA
+        self.paused = False
+        self.pause_reason = None
+        self.last_equity_update = None
+        
+        # 🔥 MÉTRICAS DE RENDIMIENTO
+        self.equity_peak = 0
+        self.equity_current = 0
+        self.daily_pnl = 0
+        self.daily_start_equity = 0
+        
+        # 🔥 INICIALIZAR MÓDULOS MEJORADOS
         self.asset_manager = AssetManager()
         self.market_data = MarketData()
         self.strategy = Strategy()
@@ -56,8 +68,12 @@ class MT5Engine:
         self.order_manager = OrderManager(self)
         self.position_manager = PositionManager(self)
 
+        # 🔥 CONEXIÓN
         self.connect()
         self.register_events()
+        
+        # 🔥 ACTUALIZAR EQUITY INICIAL
+        self._update_equity()
 
     # ==========================================================
     # CONEXIÓN Y DESCONEXIÓN
@@ -91,9 +107,14 @@ class MT5Engine:
                 return
 
             self.connected = True
+            self.equity_peak = self.account.equity
+            self.equity_current = self.account.equity
+            self.daily_start_equity = self.account.equity
+            
             logger.info(f"✅ Conectado a MT5 - Cuenta: {self.account.login}")
             logger.info(f"💰 Balance: ${self.account.balance:.2f}")
             logger.info(f"📈 Equity: ${self.account.equity:.2f}")
+            
             self._sync_initial_state()
 
         except Exception as e:
@@ -118,6 +139,44 @@ class MT5Engine:
         self.position_manager.sync()
         self.order_manager.sync()
         logger.info("Estado inicial sincronizado.")
+
+    # ==========================================================
+    # ACTUALIZACIÓN DE EQUITY Y RIESGO
+    # ==========================================================
+
+    def _update_equity(self):
+        """Actualiza el equity y verifica límites de riesgo"""
+        try:
+            account = mt5.account_info()
+            if account is None:
+                return
+            
+            self.equity_current = account.equity
+            
+            # Actualizar peak
+            if self.equity_current > self.equity_peak:
+                self.equity_peak = self.equity_current
+            
+            # Actualizar RiskManager
+            if hasattr(self, 'risk_manager'):
+                self.risk_manager.update_equity(self.equity_current)
+                self.risk_manager.daily_pnl = self.equity_current - self.daily_start_equity
+                
+                # Verificar si debemos pausar
+                should_pause, reason = self.risk_manager.should_pause_trading()
+                if should_pause and not self.paused:
+                    self.paused = True
+                    self.pause_reason = reason
+                    logger.warning(f"⏸️ Trading pausado: {reason}")
+                elif not should_pause and self.paused:
+                    self.paused = False
+                    self.pause_reason = None
+                    logger.info("▶️ Trading reanudado")
+            
+            self.last_equity_update = datetime.now()
+            
+        except Exception as e:
+            logger.error(f"Error actualizando equity: {e}")
 
     # ==========================================================
     # EVENTOS
@@ -150,6 +209,11 @@ class MT5Engine:
             "uptime": str(self.uptime()),
             "positions": len(self.position_manager.all()),
             "scans": self.scan_count,
+            "paused": self.paused,
+            "pause_reason": self.pause_reason,
+            "equity": self.equity_current,
+            "equity_peak": self.equity_peak,
+            "drawdown": (self.equity_peak - self.equity_current) / self.equity_peak if self.equity_peak > 0 else 0
         }
 
     def metrics(self):
@@ -157,32 +221,39 @@ class MT5Engine:
             "connected": self.connected,
             "account": self.account.login if self.account else None,
             "balance": self.account.balance if self.account else 0,
-            "equity": self.account.equity if self.account else 0,
+            "equity": self.equity_current,
+            "equity_peak": self.equity_peak,
+            "drawdown": (self.equity_peak - self.equity_current) / self.equity_peak if self.equity_peak > 0 else 0,
             "positions": len(self.position_manager.all()),
             "scans": self.scan_count,
             "uptime": str(self.uptime()),
+            "paused": self.paused,
+            "daily_pnl": self.daily_pnl,
         }
 
     def print_dashboard(self):
-        """Imprime el dashboard de estado"""
+        """Imprime el dashboard de estado mejorado"""
         m = self.metrics()
-        logger.info("=" * 50)
+        logger.info("=" * 60)
         logger.info("📊 DELTA ENGINE STATUS")
-        logger.info("=" * 50)
+        logger.info("=" * 60)
         logger.info(f"🔌 Connected  : {m['connected']}")
         logger.info(f"💳 Account    : {m['account']}")
         logger.info(f"💰 Balance    : ${m['balance']:.2f}")
         logger.info(f"📈 Equity     : ${m['equity']:.2f}")
+        logger.info(f"🏔️  Peak Equity: ${m['equity_peak']:.2f}")
+        logger.info(f"📉 Drawdown   : {m['drawdown']:.2%}")
         logger.info(f"📊 Positions  : {m['positions']}")
         logger.info(f"🔄 Scans      : {m['scans']}")
         logger.info(f"⏱️  Uptime     : {m['uptime']}")
-        logger.info("=" * 50)
+        logger.info(f"⏸️  Paused     : {m['paused']}")
+        if m['paused']:
+            logger.info(f"   Razón      : {self.pause_reason}")
+        logger.info("=" * 60)
 
     # ==========================================================
-    # MERCADO ABIERTO
+    # MERCADO ABIERTO MEJORADO
     # ==========================================================
-
-    # En engine/mt5_engine.py, reemplaza la función is_market_open
 
     def is_market_open(self, symbol: str = None) -> bool:
         """Verifica si el mercado está abierto para un símbolo específico"""
@@ -217,7 +288,7 @@ class MT5Engine:
         return "OPEN" if self.is_market_open() else "CLOSED"
 
     # ==========================================================
-    # HEALTH CHECK
+    # HEALTH CHECK MEJORADO
     # ==========================================================
 
     def health_check(self):
@@ -251,6 +322,18 @@ class MT5Engine:
                 logger.error("❌ PositionManager no inicializado")
                 return False
             
+            # 🔥 VERIFICAR CONEXIÓN A MT5
+            account_info = mt5.account_info()
+            if account_info is None:
+                logger.error("❌ No se pudo obtener información de cuenta MT5")
+                return False
+            
+            # 🔥 VERIFICAR SÍMBOLOS
+            symbols = self.asset_manager.get_all()
+            for symbol in symbols[:5]:  # Verificar primeros 5
+                if not mt5.symbol_select(symbol, True):
+                    logger.warning(f"⚠️ Símbolo no disponible: {symbol}")
+            
             logger.info("✅ Health Check OK")
             return True
             
@@ -259,149 +342,201 @@ class MT5Engine:
             return False
 
     # ==========================================================
-    # SCANNER Y EJECUCIÓN
+    # SCANNER Y EJECUCIÓN MEJORADOS
     # ==========================================================
 
     def scan_market(self):
-        """Obtiene señales del mercado"""
+        """Obtiene señales del mercado con filtros mejorados"""
         logger.info("🔍 Escaneando mercado...")
         symbols = self.asset_manager.get_all()
+        
+        # 🔥 OBTENER SEÑALES DE LA ESTRATEGIA MEJORADA
         signals = self.strategy.analyze_symbols(symbols)
+        
+        # 🔥 FILTRAR POR SCORE MÍNIMO
         buys = [s for s in signals if s['action'] == 'BUY' and s['score'] >= MIN_SCORE]
         sells = [s for s in signals if s['action'] == 'SELL' and s['score'] >= MIN_SCORE]
+        
         logger.info(f"📊 BUY={len(buys)} SELL={len(sells)}")
+        
+        # 🔥 LOG DE SEÑALES DETECTADAS
+        for signal in buys[:3]:
+            logger.info(f"   🟢 {signal['symbol']}: Score={signal['score']:.1f} | Conf={signal['confidence']:.2%}")
+        for signal in sells[:3]:
+            logger.info(f"   🔴 {signal['symbol']}: Score={signal['score']:.1f} | Conf={signal['confidence']:.2%}")
+        
         return buys, sells
 
-    # En engine/mt5_engine.py, reemplaza la función execute_trade
-
     def execute_trade(self, signal):
-        """Ejecuta una orden con validación de SL/TP"""
+        """Ejecuta una orden con integración completa de todos los módulos mejorados"""
         try:
             symbol = signal['symbol']
             price = signal['price']
             atr = signal.get('atr', 0.001)
+            action = signal['action']
             
             # 🔥 VERIFICAR MERCADO ABIERTO
             if not self.is_market_open(symbol):
                 logger.info(f"⏳ {symbol}: Mercado cerrado, saltando...")
                 return
             
-            # VERIFICAR POSICIÓN
+            # 🔥 VERIFICAR SI EL SISTEMA ESTÁ PAUSADO
+            if self.paused:
+                logger.info(f"⏸️ Sistema pausado: {self.pause_reason}")
+                return
+            
+            # 🔥 VERIFICAR POSICIÓN
             if self.position_manager.exists(symbol):
                 logger.info(f"⏳ {symbol}: Ya existe posición, saltando...")
                 return
             
-            # VERIFICAR TOTAL
+            # 🔥 VERIFICAR TOTAL DE POSICIONES
             total_positions = self.position_manager.get_position_count()
             if total_positions >= MAX_POSITIONS:
                 logger.info(f"⏳ Máximo de posiciones alcanzado ({MAX_POSITIONS}), saltando...")
                 return
             
-            # CALCULAR CANTIDAD SEGÚN TIPO DE ACTIVO
+            # 🔥 CALCULAR CANTIDAD SEGÚN TIPO DE ACTIVO
             asset_type = self.asset_manager.get_asset_type(symbol)
             
-            # Obtener información del símbolo para validar SL/TP
+            # Obtener información del símbolo
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
                 logger.error(f"❌ No se pudo obtener información de {symbol}")
                 return
             
-            # Calcular el tamaño mínimo de distancia (10 ticks)
-            min_distance = symbol_info.trade_tick_size * 10
-            
+            # 🔥 USAR RISK MANAGER PARA CALCULAR TAMAÑO DE POSICIÓN
             if asset_type == 'STOCK':
                 quantity = DEFAULT_QTY_STOCK
-                if signal['action'] == 'BUY':
+                if action == 'BUY':
                     stop = price * (1 - STOCK_SL_PCT)
                     target = price * (1 + STOCK_TP_PCT)
                 else:
                     stop = price * (1 + STOCK_SL_PCT)
                     target = price * (1 - STOCK_TP_PCT)
             else:
-                quantity = DEFAULT_QTY_FOREX
-                # Para Forex, usar ATR pero con validación
-                if signal['action'] == 'BUY':
+                # 🔥 USAR RISK MANAGER PARA TAMAÑO ADAPTATIVO
+                risk_quantity = self.risk_manager.calculate_position_size(
+                    symbol, price, stop if 'stop' in locals() else price * 0.99, atr
+                )
+                quantity = risk_quantity if risk_quantity > 0 else DEFAULT_QTY_FOREX
+                
+                if action == 'BUY':
                     stop = price - (atr * ATR_MULTIPLIER_SL)
                     target = price + (atr * ATR_MULTIPLIER_TP)
                 else:
                     stop = price + (atr * ATR_MULTIPLIER_SL)
                     target = price - (atr * ATR_MULTIPLIER_TP)
             
-            # 🔥 VALIDAR SL/TP
-            # Para compras: SL debe ser < price, TP debe ser > price
-            # Para ventas: SL debe ser > price, TP debe ser < price
+            # 🔥 VALIDAR SL/TP (usando la validación del OrderManager)
+            is_valid, message = self.order_manager._validate_prices(symbol, price, stop, target, action)
+            if not is_valid:
+                logger.warning(f"⚠️ {symbol}: {message}")
+                # Ajustar SL/TP automáticamente
+                if action == 'BUY':
+                    stop = price * 0.99
+                    target = price * 1.01
+                else:
+                    stop = price * 1.01
+                    target = price * 0.99
             
-            if signal['action'] == 'BUY':
-                # Validar SL (debe ser menor que el precio)
-                if stop >= price or abs(stop - price) < min_distance:
-                    stop = price - max(price * 0.005, min_distance)
-                    logger.debug(f"   SL ajustado a {stop:.5f}")
-                
-                # Validar TP (debe ser mayor que el precio)
-                if target <= price or abs(target - price) < min_distance:
-                    target = price + max(price * 0.01, min_distance * 2)
-                    logger.debug(f"   TP ajustado a {target:.5f}")
+            # 🔥 VERIFICAR RIESGO CON EL RISK MANAGER
+            risk_check, risk_reason = self.risk_manager.validate_trade(
+                symbol, action, price, stop, quantity
+            )
+            if not risk_check:
+                logger.warning(f"⚠️ Riesgo rechazado: {risk_reason}")
+                return
             
-            else:  # SELL
-                # Validar SL (debe ser mayor que el precio)
-                if stop <= price or abs(stop - price) < min_distance:
-                    stop = price + max(price * 0.005, min_distance)
-                    logger.debug(f"   SL ajustado a {stop:.5f}")
-                
-                # Validar TP (debe ser menor que el precio)
-                if target >= price or abs(target - price) < min_distance:
-                    target = price - max(price * 0.01, min_distance * 2)
-                    logger.debug(f"   TP ajustado a {target:.5f}")
+            logger.info(f"📊 {symbol} ({asset_type}): {action} {quantity} @ {price:.5f}")
+            logger.info(f"   SL: {stop:.5f} | TP: {target:.5f}")
             
-            # 🔥 VERIFICAR QUE SL/TP NO ESTÉN INVERTIDOS
-            if signal['action'] == 'BUY':
-                if stop >= target:
-                    logger.warning(f"⚠️ SL >= TP para BUY, ajustando...")
-                    stop = price - 0.01
-                    target = price + 0.02
-            
-            logger.info(f"📊 {symbol} ({asset_type}): {signal['action']} {quantity} @ {price:.2f}")
-            logger.info(f"   SL: {stop:.2f} | TP: {target:.2f}")
-            
-            # Enviar orden
+            # 🔥 ENVIAR ORDEN USANDO ORDER MANAGER MEJORADO
             result = self.order_manager.send_order(
                 symbol=symbol,
-                action=signal['action'],
+                action=action,
                 quantity=quantity,
                 price=price,
                 stop=stop,
                 target=target,
+                max_retries=3
             )
             
-            if result and (result.volume > 0 or result.volume is not None):
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(f"✅ Orden ejecutada en {symbol}")
                 self.position_manager.force_sync()
+                
+                # 🔥 REGISTRAR EN RISK MANAGER
+                self.risk_manager.register_trade(
+                    symbol=symbol,
+                    action=action,
+                    volume=quantity,
+                    entry=price,
+                    exit=0,  # Se actualizará al cerrar
+                    pnl=0
+                )
+                
+                # 🔥 ACTUALIZAR EQUITY
+                self._update_equity()
+                
             else:
-                logger.warning(f"❌ Orden falló en {symbol}")
+                error_msg = result.comment if result else "Unknown error"
+                logger.warning(f"❌ Orden falló en {symbol}: {error_msg}")
                 
         except Exception as e:
             logger.exception(f"Error ejecutando trade: {e}")
 
     # ==========================================================
-    # BUCLE PRINCIPAL
+    # GESTIÓN DE POSICIONES ACTIVAS
     # ==========================================================
 
-    # En engine/mt5_engine.py, modifica el bucle principal
+    def manage_active_positions(self):
+        """Gestiona posiciones activas con trailing stop y breakeven"""
+        try:
+            positions = self.position_manager.all()
+            if not positions:
+                return
+            
+            for symbol, pos in positions.items():
+                # 🔥 SI ESTÁ EN GANANCIA, APLICAR TRAILING STOP
+                if pos['profit'] > 0:
+                    # Intentar mover a breakeven primero
+                    if abs(pos['profit_pct']) > 0.5:  # 0.5% de ganancia
+                        self.position_manager.apply_breakeven_stop(symbol)
+                    
+                    # Si la ganancia es mayor, aplicar trailing
+                    if abs(pos['profit_pct']) > 1.0:  # 1% de ganancia
+                        self.position_manager.apply_trailing_stop(symbol)
+                
+                # 🔥 SI ESTÁ EN PÉRDIDA Y ES GRANDE, CONSIDERAR CIERRE
+                elif pos['profit'] < 0:
+                    if abs(pos['profit_pct']) > 3.0:  # 3% de pérdida
+                        logger.info(f"⚠️ {symbol}: Pérdida del {abs(pos['profit_pct']):.2f}%, cerrando...")
+                        self.position_manager.close_position(symbol)
+                        
+        except Exception as e:
+            logger.error(f"Error gestionando posiciones: {e}")
+
+    # ==========================================================
+    # BUCLE PRINCIPAL MEJORADO
+    # ==========================================================
 
     def run(self):
-        """Bucle principal del motor"""
+        """Bucle principal del motor con integración completa"""
         if not self.is_connected():
             logger.error("❌ Motor no conectado a MT5.")
             return
 
-        logger.info("=" * 60)
+        logger.info("=" * 70)
         logger.info("🚀 DELTA ENGINE para MT5 - INICIADO")
-        logger.info("=" * 60)
+        logger.info("=" * 70)
         logger.info(f"📊 Acciones: {len(STOCKS)}")
         logger.info(f"🪙 Forex: {len(FOREX)}")
         logger.info(f"📈 Máximo posiciones: {MAX_POSITIONS}")
         logger.info(f"🎯 Score mínimo: {MIN_SCORE}")
-        logger.info("=" * 60 + "\n")
+        logger.info(f"⏱️  Cooldown: {COOLDOWN_MINUTES} min")
+        logger.info(f"💀 Riesgo por trade: {RISK_PER_TRADE:.2%}")
+        logger.info("=" * 70 + "\n")
         
         self.running = True
 
@@ -409,44 +544,66 @@ class MT5Engine:
             try:
                 self.scan_count += 1
                 
-                # Sincronizar posiciones
+                # 🔥 ACTUALIZAR EQUITY
+                self._update_equity()
+                
+                # 🔥 SINCRONIZAR POSICIONES
                 self.position_manager.sync()
                 self.order_manager.sync()
 
-                # Verificar mercado global (Forex)
+                # 🔥 VERIFICAR MERCADO
                 if not self.is_market_open():
-                    logger.info("🔴 Mercado Forex cerrado (fin de semana). Esperando...")
+                    logger.info("🔴 Mercado cerrado. Esperando...")
                     time.sleep(60)
                     continue
 
-                # Escanear
+                # 🔥 VERIFICAR SI ESTÁ PAUSADO POR RIESGO
+                if self.paused:
+                    logger.info(f"⏸️ Sistema pausado: {self.pause_reason}")
+                    time.sleep(30)
+                    continue
+
+                # 🔥 GESTIONAR POSICIONES ACTIVAS
+                self.manage_active_positions()
+
+                # 🔥 ESCANEAR MERCADO
                 buys, sells = self.scan_market()
 
-                # Ejecutar compras (con validación individual)
+                # 🔥 EJECUTAR COMPRAS
                 if buys:
-                    available = self.risk_manager.max_positions - len(self.position_manager.all())
+                    available = MAX_POSITIONS - len(self.position_manager.all())
                     for signal in buys[:available]:
-                        # 🔥 Verificar mercado para cada símbolo individualmente
                         if self.is_market_open(signal['symbol']):
                             self.execute_trade(signal)
                         else:
                             logger.info(f"⏳ {signal['symbol']}: Mercado cerrado, saltando...")
 
-                # Ejecutar ventas (si las hay)
+                # 🔥 EJECUTAR VENTAS
                 if sells:
-                    available = self.risk_manager.max_positions - len(self.position_manager.all())
+                    available = MAX_POSITIONS - len(self.position_manager.all())
                     for signal in sells[:available]:
                         if self.is_market_open(signal['symbol']):
                             self.execute_trade(signal)
                         else:
                             logger.info(f"⏳ {signal['symbol']}: Mercado cerrado, saltando...")
 
-                # Resumen
+                # 🔥 RESUMEN DE POSICIONES
                 self.position_manager.print_summary()
                 
-                # Dashboard cada 10 escaneos
+                # 🔥 DASHBOARD CADA 10 ESCANEOS
                 if self.scan_count % 10 == 0:
                     self.print_dashboard()
+                    
+                    # Mostrar métricas de riesgo
+                    risk_metrics = self.risk_manager.get_metrics()
+                    if risk_metrics.get('total_trades', 0) > 0:
+                        logger.info(f"📊 Win Rate: {risk_metrics['win_rate']:.2%}")
+                        logger.info(f"📊 Sharpe: {risk_metrics['sharpe_ratio']:.2f}")
+
+                # 🔥 RESET DIARIO
+                if datetime.now().hour == 0 and datetime.now().minute == 0:
+                    self.risk_manager.reset_daily_stats()
+                    logger.info("🔄 Estadísticas diarias reiniciadas")
 
                 time.sleep(SCAN_INTERVAL)
 
@@ -476,7 +633,7 @@ class MT5Engine:
 def main():
     """Función principal"""
     logger.info("=" * 70)
-    logger.info("🚀 DELTA ENGINE PRO - MT5")
+    logger.info("🚀 DELTA ENGINE PRO - MT5 (VERSIÓN MEJORADA)")
     logger.info("=" * 70)
     
     engine = MT5Engine()
